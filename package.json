@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "npm run dev --prefix functions"
+    "dev": "npm run dev --prefix functions",
+    "build": "npm install --prefix functions && npm run build --prefix functions",
+    "start": "node functions/lib/server.js"
   }
 }

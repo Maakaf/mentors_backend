@@ -200,12 +200,10 @@ router.post("/login", async (req: Request, res: Response) => {
   try {
     const session = await signInWithPassword(email, password);
 
-    if (process.env.NODE_ENV !== "development") {
-      const userRecord = await admin.auth().getUser(session.localId);
-      if (!userRecord.emailVerified) {
-        res.status(403).json({ error: { code: "EMAIL_NOT_VERIFIED" } });
-        return;
-      }
+    const userRecord = await admin.auth().getUser(session.localId);
+    if (!userRecord.emailVerified) {
+      res.status(403).json({ error: { code: "EMAIL_NOT_VERIFIED" }, uid: session.localId });
+      return;
     }
 
     const userDoc = await db().collection("users").doc(session.localId).get();

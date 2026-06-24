@@ -43,7 +43,8 @@ export type RequestStatus =
   | "approved"
   | "rejected"
   | "needs_info"
-  | "completed";
+  | "completed"
+  | "canceled";
 
 export interface MentorshipRequest {
   menteeId: string;
@@ -54,12 +55,25 @@ export interface MentorshipRequest {
   description: string | null;
   status: RequestStatus;
   mentorResponse: string | null;
+  menteeReply: string | null;
   createdAt: firestore.Timestamp;
   updatedAt: firestore.Timestamp;
 }
 
 export interface Topic {
   name: string;
+}
+
+export type TimelineEventType = "created" | "status_changed";
+
+export interface TimelineEvent {
+  type: TimelineEventType;
+  authorId: string;
+  authorRole: "mentor" | "mentee";
+  content: string | null;
+  fromStatus: RequestStatus | null;
+  toStatus: RequestStatus;
+  createdAt: firestore.Timestamp;
 }
 
 export type NotificationType = "new_request" | "request_response";

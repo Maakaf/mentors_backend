@@ -191,6 +191,8 @@ First time only: `cd functions && npm install`.
 
 Handled by `functions/src/email.ts` via the Gmail API (OAuth2). All sends are fire-and-forget — email failures are logged but never block the API response. Set `DISABLE_EMAILS=true` in `.env` to suppress emails locally.
 
+All emails share a common `layout()` wrapper that includes the Maakaf logo (`https://maakaf.com/images/logo-light.png`) at the top and a sign-off at the bottom.
+
 | Trigger | Recipient | Subject |
 | --- | --- | --- |
 | New user registers (mentor/mentee) | The new user | אמת/י את כתובת האימייל שלך — מעקף מנטורינג |

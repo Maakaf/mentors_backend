@@ -28,6 +28,12 @@ function mimeWord(text: string) {
 function layout(content: string) {
   return `
     <div dir="rtl" style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="text-align:center; margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid #e6e6e6;">
+        <img src="https://maakaf.com/images/logo-light.png"
+             alt="מעקף"
+             width="120"
+             style="display:inline-block;" />
+      </div>
       ${content}
       <p style="color:#666;font-size:13px;margin-top:24px;">בברכה,<br/>צוות מעקף</p>
     </div>`;

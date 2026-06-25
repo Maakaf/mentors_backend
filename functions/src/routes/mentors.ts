@@ -2,6 +2,7 @@ import { Router } from "express";
 import * as admin from "firebase-admin";
 import { requireAuth, AuthedRequest } from "../middleware/auth";
 import { MentorProfile } from "../types";
+import { parseAvailability } from "../utils";
 
 const router = Router();
 const db = () => admin.firestore();
@@ -70,7 +71,7 @@ router.put("/me", requireAuth, async (req: AuthedRequest, res) => {
       company: company ?? null,
       expertise,
       yearsExperience: yearsExperience ?? null,
-      availability: availability === "unavailable" ? "unavailable" : "available",
+      availability: parseAvailability(availability),
       linkedIn: linkedIn ?? null,
       calendlyUrl: calendlyUrl ?? null,
       createdAt: existing.exists ? (existing.data() as MentorProfile).createdAt : now,

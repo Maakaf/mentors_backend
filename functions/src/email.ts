@@ -28,6 +28,12 @@ function mimeWord(text: string) {
 function layout(content: string) {
   return `
     <div dir="rtl" style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="text-align:center; margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid #e6e6e6;">
+        <img src="https://maakaf.com/images/logo-light.png"
+             alt="מעקף"
+             width="120"
+             style="display:inline-block;" />
+      </div>
       ${content}
       <p style="color:#666;font-size:13px;margin-top:24px;">בברכה,<br/>צוות מעקף</p>
     </div>`;
@@ -54,20 +60,20 @@ async function send(to: string, subject: string, html: string): Promise<void> {
   });
 }
 
-export async function sendVerificationEmail(
+export async function sendVerificationCode(
   to: string,
   fullName: string,
-  verificationLink: string
+  code: string
 ): Promise<void> {
   await send(
     to,
-    "אמת/י את כתובת האימייל שלך — מעקף מנטורינג",
+    "קוד האימות שלך — מעקף מנטורינג",
     layout(`
       <h2>שלום ${escapeHtml(fullName)},</h2>
       <p>ברוך/ה הבא/ה למערכת המנטורינג של קהילת מעקף!</p>
-      <p>כדי להשלים את הרשמתך ולהתחיל להשתמש במערכת, יש לאמת את כתובת האימייל שלך:</p>
-      ${dashboardBtn(verificationLink, "אימות כתובת האימייל")}
-      <p style="color:#666;font-size:13px;">הקישור תקף ל-24 שעות. אם לא נרשמתם, ניתן להתעלם מהודעה זו.</p>
+      <p>קוד האימות שלך:</p>
+      <div style="font-size:36px;font-weight:700;letter-spacing:10px;text-align:center;padding:20px;background:#f0f4f8;border-radius:8px;margin:16px 0;">${escapeHtml(code)}</div>
+      <p style="color:#666;font-size:13px;">הקוד תקף ל-15 דקות. אם לא נרשמתם, ניתן להתעלם מהודעה זו.</p>
     `)
   );
 }
@@ -86,7 +92,7 @@ export async function sendNewRequestEmail(
 
   await send(
     mentorEmail,
-    `בקשת מנטורינג חדשה מ-${menteeName}`,
+    `בקשת מנטורינג חדשה מ-${escapeHtml(menteeName)}`,
     layout(`
       <h2>שלום ${escapeHtml(mentorName)},</h2>
       <p><strong>${escapeHtml(menteeName)}</strong> שלח/ה לך בקשת מנטורינג חדשה בנושא: <strong>${escapeHtml(topic)}</strong>.</p>
@@ -120,7 +126,7 @@ export async function sendMentorResponseEmail(
 
   await send(
     menteeEmail,
-    `עדכון בקשת המנטורינג שלך — ${statusLabel}`,
+    `עדכון בקשת המנטורינג שלך — ${escapeHtml(statusLabel)}`,
     layout(`
       <h2>שלום ${escapeHtml(menteeName)},</h2>
       <p>${escapeHtml(mentorName)} עדכן/ה את הבקשה שלך לסטטוס: <strong>${statusLabel}</strong>.</p>
@@ -130,18 +136,19 @@ export async function sendMentorResponseEmail(
   );
 }
 
-export async function sendPasswordResetEmail(
+export async function sendPasswordResetCode(
   to: string,
-  resetLink: string
+  fullName: string,
+  code: string
 ): Promise<void> {
   await send(
     to,
-    "איפוס סיסמה — מעקף מנטורינג",
+    "קוד לאיפוס סיסמה — מעקף מנטורינג",
     layout(`
-      <h2>איפוס סיסמה</h2>
-      <p>קיבלנו בקשה לאיפוס הסיסמה שלך. לחצו על הכפתור כדי לאפס:</p>
-      ${dashboardBtn(resetLink, "איפוס סיסמה")}
-      <p style="color:#666;font-size:13px;">אם לא ביקשתם לאפס את הסיסמה, ניתן להתעלם מהודעה זו.</p>
+      <h2>שלום ${escapeHtml(fullName)},</h2>
+      <p>קיבלנו בקשה לאיפוס הסיסמה שלך. קוד האיפוס:</p>
+      <div style="font-size:36px;font-weight:700;letter-spacing:10px;text-align:center;padding:20px;background:#f0f4f8;border-radius:8px;margin:16px 0;">${escapeHtml(code)}</div>
+      <p style="color:#666;font-size:13px;">הקוד תקף ל-15 דקות. אם לא ביקשת/י לאפס סיסמה, ניתן להתעלם מהודעה זו.</p>
     `)
   );
 }

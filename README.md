@@ -16,7 +16,14 @@ system. Consumed by the מנטורינג pages in
   **server-side** via `/auth/register` and `/auth/login`, using the Admin SDK and
   the Identity Toolkit REST API. The frontend never uses the Firebase SDK; it stores
   the returned ID token and sends it as `Authorization: Bearer <token>`.
-- Nodemailer via Gmail SMTP — transactional emails (welcome, mentorship requests, password reset)
+- Gmail API (OAuth2) — transactional emails (verification, mentorship requests, password reset)
+
+### Shared utilities (`functions/src/`)
+
+| File | Purpose |
+| --- | --- |
+| `utils.ts` | `generateOTP()` (crypto-random 6-digit code), `getOTPExpiry()`, `timingSafeEqual()` (constant-time comparison), `parseAvailability()` |
+| `rateLimiter.ts` | In-memory per-key rate limiter with auto-pruning; used on login, OTP and reset endpoints |
 
 `functions/src/index.ts` is a dormant Firebase Cloud Functions entry kept for future
 use if the project moves to the Firebase Blaze billing plan.
@@ -25,11 +32,15 @@ use if the project moves to the Firebase Blaze billing plan.
 
 ```text
 users/{uid}
-  role: "mentor" | "mentee"
+  role: "mentor" | "mentee" | "admin"
   fullName
   email
   isAdmin
   createdAt
+  verificationCode         (temporary — present only while email is unverified)
+  verificationCodeExpiry   (Timestamp — code valid for 15 minutes)
+  resetCode                (temporary — present only during an active password reset)
+  resetCodeExpiry          (Timestamp — code valid for 15 minutes)
 
 mentorProfiles/{uid}
   userId
@@ -38,10 +49,9 @@ mentorProfiles/{uid}
   currentRole          (optional)
   company              (optional)
   expertise: string[]  (required)
-  yearsExperience      (optional)
   availability: "available" | "unavailable"
-  linkedIn             (required — displayed on mentor cards)
-  calendlyUrl          (required — displayed on mentor cards)
+  linkedIn             (optional)
+  calendlyUrl          (optional)
   createdAt
   updatedAt
 
@@ -114,11 +124,13 @@ Authenticated endpoints expect `Authorization: Bearer <Firebase ID token>`.
 
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
-| POST | `/auth/register` | — | Create account (`role`, `fullName`, `email`, `password`, + role profile fields), write `users/{uid}` + profile doc, and sign in |
-| POST | `/auth/login` | — | Sign in with `email`/`password`, returns `idToken`/`refreshToken`/`uid`/`role` |
-| POST | `/auth/forgot-password` | — | Send a password reset email via Firebase + Gmail |
-| GET | `/auth/verify-status/:uid` | — | Poll whether a user's email has been verified |
-| POST | `/auth/resend-verification` | — | Resend the verification email |
+| POST | `/auth/register` | — | Create account, send 6-digit OTP to email, return `uid` + `pendingVerification: true` |
+| POST | `/auth/verify-code` | — | Validate OTP (`uid`, `code`, `email`, `password`), mark email verified, auto-login — returns full session |
+| POST | `/auth/resend-verification` | — | Generate + send a fresh OTP to the given email |
+| POST | `/auth/login` | — | Sign in; if email unverified, sends fresh OTP and returns `403 EMAIL_NOT_VERIFIED` + `uid` |
+| POST | `/auth/forgot-password` | — | Check email is registered (`USER_NOT_FOUND` if not), send 6-digit reset code, return `{ ok, uid }` |
+| POST | `/auth/reset-password` | — | Validate reset code, set new password via Admin SDK, clear code from Firestore |
+| GET | `/auth/verify-status/:uid` | — | Check whether a user's email has been verified |
 | POST | `/auth/refresh` | — | Exchange a refresh token for a new ID token |
 | GET | `/topics` | — | List shared mentorship topics |
 | POST | `/topics` | admin | Add a topic |
@@ -133,6 +145,9 @@ Authenticated endpoints expect `Authorization: Bearer <Firebase ID token>`.
 | PATCH | `/requests/:id` | mentor/mentee | Update request status. Mentor: `approved`, `rejected`, `needs_info`, `completed`. Mentee: resubmit (`pending` + optional `menteeReply` after `needs_info`), `canceled` (from `pending`), `completed` (from `approved`) |
 | GET | `/requests/:id/timeline` | mentor/mentee | Full chronological event history for a request |
 | GET | `/admin/stats` | admin | Counts + status breakdown for the admin dashboard |
+| GET | `/admin/requests` | admin | All mentorship requests ordered by date |
+| GET | `/admin/users/mentors` | admin | All mentor profiles |
+| GET | `/admin/users/mentees` | admin | All mentee profiles |
 | GET | `/notifications` | any | The signed-in user's recent notifications (last 50) |
 | PATCH | `/notifications/:id/read` | any | Mark a single notification as read |
 | POST | `/notifications/read-all` | any | Mark all notifications as read |
@@ -150,9 +165,19 @@ Create `functions/.env` (see `functions/.env.example` for all variables and comm
 ```env
 GOOGLE_APPLICATION_CREDENTIALS=./serviceAccountKey.json
 FIREBASE_API_KEY=your-firebase-web-api-key
-GMAIL_USER=donotreplymkf@gmail.com
-GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 SITE_URL=http://localhost:1313
+
+# Allowed CORS origin (defaults to SITE_URL; set to production domain in prod)
+CORS_ORIGIN=http://localhost:1313
+
+# Gmail API OAuth2 (console.cloud.google.com → Gmail API → OAuth2)
+GMAIL_USER=donotreplymkf@gmail.com
+GMAIL_CLIENT_ID=xxxx.apps.googleusercontent.com
+GMAIL_CLIENT_SECRET=xxxx
+GMAIL_REFRESH_TOKEN=xxxx
+
+# Suppress outgoing emails in local dev (do NOT set in production)
+DISABLE_EMAILS=true
 ```
 
 Alternatively, paste the entire service account JSON inline:
@@ -162,7 +187,8 @@ FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 ```
 
 `FIREBASE_API_KEY` — Firebase Web API key from Firebase Console → Project settings → General.  
-`GMAIL_USER` / `GMAIL_APP_PASSWORD` — Gmail account used as the email sender. Enable 2FA on the account, then generate an App Password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).  
+`GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` — Gmail API OAuth2 credentials. Create an OAuth2 client at [console.cloud.google.com](https://console.cloud.google.com) with the Gmail API enabled, then generate a refresh token via the OAuth2 Playground.  
+`DISABLE_EMAILS=true` — set in `.env` to suppress outgoing emails during local development. Emails log to the console instead. Do not set this in production.  
 `SITE_URL` — base URL of the frontend. Used in email links. Set to the production domain when deploying.
 
 ### 2. Run
@@ -177,16 +203,36 @@ First time only: `cd functions && npm install`.
 
 `maakaf_home` must also be running — from the `maakaf_home` repo root, run `hugo server`.
 
+## Security
+
+| Mechanism | Detail |
+| --- | --- |
+| **Rate limiting** | Login: 10/15 min per email. OTP verify & reset: 5/15 min per UID. Forgot-password & resend: 3/10 min per email. Blocked → `429 TOO_MANY_ATTEMPTS`. Counter cleared on success. |
+| **Timing-safe OTP** | Code comparisons use `crypto.timingSafeEqual()` to prevent timing-based enumeration. |
+| **Crypto-random OTP** | `crypto.randomInt()` — uniform distribution, no modulo bias. |
+| **CORS** | Restricted to `CORS_ORIGIN` env var; all other origins rejected. |
+| **Body size limit** | `express.json({ limit: "50kb" })` — oversized payloads rejected. |
+| **Input validation** | `mentorId` and `topic` type-checked as non-empty strings before DB access. |
+| **Error format** | All routes return `{ error: { code: "..." } }` — no plain-string errors. |
+| **Privilege gating** | `requireAuth` + `requireAdmin` on all protected routes; `isAdmin` is server-set only. |
+| **Mentee profile access** | Mentor can only view a mentee's profile while an active request (`pending`/`approved`/`needs_info`) exists between them. |
+
 ## Email notifications
 
-Handled by `functions/src/email.ts` via Nodemailer + Gmail SMTP. All sends are fire-and-forget — email failures are logged but never block the API response.
+Handled by `functions/src/email.ts` via the Gmail API (OAuth2). All sends are fire-and-forget — email failures are logged but never block the API response. Set `DISABLE_EMAILS=true` in `.env` to suppress emails locally.
+
+All emails share a common `layout()` wrapper that includes the Maakaf logo (`https://maakaf.com/images/logo-light.png`) at the top and a sign-off at the bottom.
 
 | Trigger | Recipient | Subject |
 | --- | --- | --- |
-| New user registers | The new user | ברוך/ה הבא/ה למערכת המנטורינג של מעקף! |
+| New user registers (mentor/mentee) | The new user | קוד האימות שלך — מעקף מנטורינג |
+| Unverified user tries to log in | The user | קוד האימות שלך — מעקף מנטורינג |
+| User requests a new OTP code | The user | קוד האימות שלך — מעקף מנטורינג |
 | Mentee submits a request | The mentor | בקשת מנטורינג חדשה מ-{menteeName} (includes description + deep-link to request) |
 | Mentor responds to a request | The mentee | עדכון בקשת המנטורינג שלך — {status} (includes response text + deep-link to request) |
-| User requests password reset | The user | איפוס סיסמה — מעקף מנטורינג |
+| User requests password reset | The user | קוד לאיפוס סיסמה — מעקף מנטורינג |
+
+Admin accounts (`role: "admin"`) are created without email verification and without sending an email. They require manual activation (`isAdmin: true`) in Firestore before they can access admin endpoints.
 
 Email CTAs link directly to the specific request card via `#req-{requestId}` anchors on the dashboard pages.
 

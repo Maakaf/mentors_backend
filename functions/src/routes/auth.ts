@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import * as admin from "firebase-admin";
 import { MentorProfile, MenteeProfile, UserDoc, UserRole } from "../types";
 import { signInWithPassword, refreshIdToken, IdentityToolkitError } from "../identityToolkit";
-import { sendVerificationCode, sendPasswordResetEmail } from "../email";
+import { sendVerificationCode, sendPasswordResetCode } from "../email";
 
 const router = Router();
 const db = () => admin.firestore();
@@ -156,14 +156,71 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     return;
   }
 
+  let userRecord;
   try {
-    const resetLink = await admin.auth().generatePasswordResetLink(email);
-    await sendPasswordResetEmail(email, resetLink);
-  } catch (err) {
-    console.error("forgot-password error:", err);
+    userRecord = await admin.auth().getUserByEmail(email);
+  } catch {
+    res.status(404).json({ error: { code: "USER_NOT_FOUND" } });
+    return;
   }
 
-  res.json({ ok: true });
+  const code    = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiry  = admin.firestore.Timestamp.fromDate(new Date(Date.now() + 15 * 60 * 1000));
+  const userRef = db().collection("users").doc(userRecord.uid);
+  const userDoc = await userRef.get();
+  const fullName = (userDoc.data()?.fullName as string) ?? email;
+  await userRef.update({ resetCode: code, resetCodeExpiry: expiry });
+
+  try {
+    await sendPasswordResetCode(email, fullName, code);
+    console.log(`[reset] code sent to ${email}`);
+  } catch (err) {
+    console.error("[reset] failed to send code:", err);
+  }
+
+  res.json({ ok: true, uid: userRecord.uid });
+});
+
+// POST /auth/reset-password
+router.post("/reset-password", async (req: Request, res: Response) => {
+  const { uid, code, newPassword } = req.body as {
+    uid?: string; code?: string; newPassword?: string;
+  };
+
+  if (!uid || !code || !newPassword) {
+    res.status(400).json({ error: { code: "MISSING_FIELDS" } });
+    return;
+  }
+
+  try {
+    const userRef = db().collection("users").doc(uid);
+    const userDoc = await userRef.get();
+    const data    = userDoc.data();
+
+    if (!data?.resetCode) {
+      res.status(400).json({ error: { code: "INVALID_CODE" } });
+      return;
+    }
+    if ((data.resetCodeExpiry as admin.firestore.Timestamp).toDate() < new Date()) {
+      res.status(400).json({ error: { code: "CODE_EXPIRED" } });
+      return;
+    }
+    if (data.resetCode !== code) {
+      res.status(400).json({ error: { code: "INVALID_CODE" } });
+      return;
+    }
+
+    await admin.auth().updateUser(uid, { password: newPassword });
+    await userRef.update({
+      resetCode:        admin.firestore.FieldValue.delete(),
+      resetCodeExpiry:  admin.firestore.FieldValue.delete(),
+    });
+
+    res.json({ ok: true });
+  } catch (err: any) {
+    const code = err?.errorInfo?.code ?? "INTERNAL_ERROR";
+    res.status(400).json({ error: { code } });
+  }
 });
 
 // GET /auth/verify-status/:uid - poll whether a user's email has been verified

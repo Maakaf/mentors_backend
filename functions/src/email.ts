@@ -136,18 +136,19 @@ export async function sendMentorResponseEmail(
   );
 }
 
-export async function sendPasswordResetEmail(
+export async function sendPasswordResetCode(
   to: string,
-  resetLink: string
+  fullName: string,
+  code: string
 ): Promise<void> {
   await send(
     to,
-    "איפוס סיסמה — מעקף מנטורינג",
+    "קוד לאיפוס סיסמה — מעקף מנטורינג",
     layout(`
-      <h2>איפוס סיסמה</h2>
-      <p>קיבלנו בקשה לאיפוס הסיסמה שלך. לחצו על הכפתור כדי לאפס:</p>
-      ${dashboardBtn(resetLink, "איפוס סיסמה")}
-      <p style="color:#666;font-size:13px;">אם לא ביקשתם לאפס את הסיסמה, ניתן להתעלם מהודעה זו.</p>
+      <h2>שלום ${escapeHtml(fullName)},</h2>
+      <p>קיבלנו בקשה לאיפוס הסיסמה שלך. קוד האיפוס:</p>
+      <div style="font-size:36px;font-weight:700;letter-spacing:10px;text-align:center;padding:20px;background:#f0f4f8;border-radius:8px;margin:16px 0;">${escapeHtml(code)}</div>
+      <p style="color:#666;font-size:13px;">הקוד תקף ל-15 דקות. אם לא ביקשת/י לאפס סיסמה, ניתן להתעלם מהודעה זו.</p>
     `)
   );
 }

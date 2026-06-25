@@ -32,6 +32,8 @@ users/{uid}
   createdAt
   verificationCode         (temporary — present only while email is unverified)
   verificationCodeExpiry   (Timestamp — code valid for 15 minutes)
+  resetCode                (temporary — present only during an active password reset)
+  resetCodeExpiry          (Timestamp — code valid for 15 minutes)
 
 mentorProfiles/{uid}
   userId
@@ -119,7 +121,8 @@ Authenticated endpoints expect `Authorization: Bearer <Firebase ID token>`.
 | POST | `/auth/verify-code` | — | Validate OTP (`uid`, `code`, `email`, `password`), mark email verified, auto-login — returns full session |
 | POST | `/auth/resend-verification` | — | Generate + send a fresh OTP to the given email |
 | POST | `/auth/login` | — | Sign in; if email unverified, sends fresh OTP and returns `403 EMAIL_NOT_VERIFIED` + `uid` |
-| POST | `/auth/forgot-password` | — | Send a password reset email |
+| POST | `/auth/forgot-password` | — | Check email is registered (`USER_NOT_FOUND` if not), send 6-digit reset code, return `{ ok, uid }` |
+| POST | `/auth/reset-password` | — | Validate reset code, set new password via Admin SDK, clear code from Firestore |
 | GET | `/auth/verify-status/:uid` | — | Check whether a user's email has been verified |
 | POST | `/auth/refresh` | — | Exchange a refresh token for a new ID token |
 | GET | `/topics` | — | List shared mentorship topics |
@@ -203,7 +206,7 @@ All emails share a common `layout()` wrapper that includes the Maakaf logo (`htt
 | User requests a new OTP code | The user | קוד האימות שלך — מעקף מנטורינג |
 | Mentee submits a request | The mentor | בקשת מנטורינג חדשה מ-{menteeName} (includes description + deep-link to request) |
 | Mentor responds to a request | The mentee | עדכון בקשת המנטורינג שלך — {status} (includes response text + deep-link to request) |
-| User requests password reset | The user | איפוס סיסמה — מעקף מנטורינג |
+| User requests password reset | The user | קוד לאיפוס סיסמה — מעקף מנטורינג |
 
 Admin accounts (`role: "admin"`) are created without email verification and without sending an email. They require manual activation (`isAdmin: true`) in Firestore before they can access admin endpoints.
 

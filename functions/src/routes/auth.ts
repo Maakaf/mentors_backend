@@ -3,6 +3,8 @@ import * as admin from "firebase-admin";
 import { MentorProfile, MenteeProfile, UserDoc, UserRole } from "../types";
 import { signInWithPassword, refreshIdToken, IdentityToolkitError } from "../identityToolkit";
 import { sendVerificationCode, sendPasswordResetCode } from "../email";
+import { generateOTP, getOTPExpiry, timingSafeEqual, parseAvailability } from "../utils";
+import { checkRateLimit, clearRateLimit } from "../rateLimiter";
 
 const router = Router();
 const db = () => admin.firestore();
@@ -40,7 +42,7 @@ function buildMentorProfile(
     company: (company as string) ?? null,
     expertise: expertise as string[],
     yearsExperience: (yearsExperience as number) ?? null,
-    availability: availability === "unavailable" ? "unavailable" : "available",
+    availability: parseAvailability(availability),
     linkedIn: (linkedIn as string) ?? null,
     calendlyUrl: (calendlyUrl as string) ?? null,
     createdAt: now,
@@ -77,12 +79,49 @@ async function saveRoleProfile(
   now: admin.firestore.Timestamp
 ): Promise<void> {
   if (role === "mentor") {
-    const profile = buildMentorProfile(uid, fullName, email, body, now);
-    await db().collection("mentorProfiles").doc(uid).set(profile);
+    await db().collection("mentorProfiles").doc(uid).set(buildMentorProfile(uid, fullName, email, body, now));
   } else {
-    const profile = buildMenteeProfile(uid, fullName, email, body, now);
-    await db().collection("menteeProfiles").doc(uid).set(profile);
+    await db().collection("menteeProfiles").doc(uid).set(buildMenteeProfile(uid, fullName, email, body, now));
   }
+}
+
+// ─── OTP helpers ──────────────────────────────────────────────────────────────
+
+async function issueOTP(
+  userRef: admin.firestore.DocumentReference,
+  field: "verificationCode" | "resetCode"
+): Promise<string> {
+  const code   = generateOTP();
+  const expiry = getOTPExpiry();
+  await userRef.update({
+    [field]:           code,
+    [`${field}Expiry`]: expiry,
+  });
+  return code;
+}
+
+function validateOTP(
+  data: admin.firestore.DocumentData,
+  submittedCode: string,
+  field: "verificationCode" | "resetCode"
+): "ok" | "INVALID_CODE" | "CODE_EXPIRED" {
+  const stored = data[field];
+  const expiry = data[`${field}Expiry`] as admin.firestore.Timestamp | undefined;
+
+  if (!stored) return "INVALID_CODE";
+  if (!expiry || expiry.toDate() < new Date()) return "CODE_EXPIRED";
+  if (!timingSafeEqual(stored, submittedCode)) return "INVALID_CODE";
+  return "ok";
+}
+
+async function clearOTP(
+  userRef: admin.firestore.DocumentReference,
+  field: "verificationCode" | "resetCode"
+): Promise<void> {
+  await userRef.update({
+    [field]:            admin.firestore.FieldValue.delete(),
+    [`${field}Expiry`]: admin.firestore.FieldValue.delete(),
+  });
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -91,10 +130,7 @@ async function saveRoleProfile(
 router.post("/register", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
   const { role, fullName, email, password } = body as {
-    role?: UserRole;
-    fullName?: string;
-    email?: string;
-    password?: string;
+    role?: UserRole; fullName?: string; email?: string; password?: string;
   };
 
   const validationError = validateRegisterBody(body);
@@ -126,19 +162,15 @@ router.post("/register", async (req: Request, res: Response) => {
 
     await saveRoleProfile(uid, role as "mentor" | "mentee", fullName!, email!, body, now);
   } catch (err) {
-    // Firestore failed — roll back the Auth user to prevent an orphaned account
     await admin.auth().deleteUser(uid).catch(() => {});
     console.error("Register: Firestore write failed", err);
     res.status(500).json({ error: { code: "INTERNAL_ERROR" } });
     return;
   }
 
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiry = admin.firestore.Timestamp.fromDate(new Date(Date.now() + 15 * 60 * 1000));
-  await db().collection("users").doc(uid).update({ verificationCode: code, verificationCodeExpiry: expiry });
-  console.log(`[verify] code=${code} generated for uid=${uid}`);
-
   try {
+    const userRef = db().collection("users").doc(uid);
+    const code    = await issueOTP(userRef, "verificationCode");
     await sendVerificationCode(email!, fullName!, code);
     console.log(`[verify] code email sent to ${email}`);
   } catch (err) {
@@ -156,6 +188,12 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     return;
   }
 
+  // Rate-limit: 3 requests per 10 minutes per email
+  if (!checkRateLimit(`forgot:${email}`, 3, 10 * 60 * 1000)) {
+    res.status(429).json({ error: { code: "TOO_MANY_ATTEMPTS" } });
+    return;
+  }
+
   let userRecord;
   try {
     userRecord = await admin.auth().getUserByEmail(email);
@@ -164,14 +202,11 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     return;
   }
 
-  const code    = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiry  = admin.firestore.Timestamp.fromDate(new Date(Date.now() + 15 * 60 * 1000));
-  const userRef = db().collection("users").doc(userRecord.uid);
-  const userDoc = await userRef.get();
-  const fullName = (userDoc.data()?.fullName as string) ?? email;
-  await userRef.update({ resetCode: code, resetCodeExpiry: expiry });
-
   try {
+    const userRef  = db().collection("users").doc(userRecord.uid);
+    const userDoc  = await userRef.get();
+    const fullName = (userDoc.data()?.fullName as string) ?? email;
+    const code     = await issueOTP(userRef, "resetCode");
     await sendPasswordResetCode(email, fullName, code);
     console.log(`[reset] code sent to ${email}`);
   } catch (err) {
@@ -192,38 +227,35 @@ router.post("/reset-password", async (req: Request, res: Response) => {
     return;
   }
 
+  // Rate-limit: 5 attempts per 15 minutes per uid
+  if (!checkRateLimit(`reset:${uid}`, 5, 15 * 60 * 1000)) {
+    res.status(429).json({ error: { code: "TOO_MANY_ATTEMPTS" } });
+    return;
+  }
+
   try {
     const userRef = db().collection("users").doc(uid);
     const userDoc = await userRef.get();
     const data    = userDoc.data();
 
-    if (!data?.resetCode) {
-      res.status(400).json({ error: { code: "INVALID_CODE" } });
-      return;
-    }
-    if ((data.resetCodeExpiry as admin.firestore.Timestamp).toDate() < new Date()) {
-      res.status(400).json({ error: { code: "CODE_EXPIRED" } });
-      return;
-    }
-    if (data.resetCode !== code) {
-      res.status(400).json({ error: { code: "INVALID_CODE" } });
+    const result = validateOTP(data ?? {}, code, "resetCode");
+    if (result !== "ok") {
+      res.status(400).json({ error: { code: result } });
       return;
     }
 
     await admin.auth().updateUser(uid, { password: newPassword });
-    await userRef.update({
-      resetCode:        admin.firestore.FieldValue.delete(),
-      resetCodeExpiry:  admin.firestore.FieldValue.delete(),
-    });
+    await clearOTP(userRef, "resetCode");
+    clearRateLimit(`reset:${uid}`);
 
     res.json({ ok: true });
   } catch (err: any) {
-    const code = err?.errorInfo?.code ?? "INTERNAL_ERROR";
-    res.status(400).json({ error: { code } });
+    const errCode = err?.errorInfo?.code ?? "INTERNAL_ERROR";
+    res.status(400).json({ error: { code: errCode } });
   }
 });
 
-// GET /auth/verify-status/:uid - poll whether a user's email has been verified
+// GET /auth/verify-status/:uid
 router.get("/verify-status/:uid", async (req: Request, res: Response) => {
   try {
     const userRecord = await admin.auth().getUser(req.params.uid);
@@ -241,15 +273,19 @@ router.post("/resend-verification", async (req: Request, res: Response) => {
     return;
   }
 
+  // Rate-limit: 3 resends per 10 minutes per email
+  if (!checkRateLimit(`resend:${email}`, 3, 10 * 60 * 1000)) {
+    res.status(429).json({ error: { code: "TOO_MANY_ATTEMPTS" } });
+    return;
+  }
+
   try {
     const userRecord = await admin.auth().getUserByEmail(email);
     if (!userRecord.emailVerified) {
-      const userRef = db().collection("users").doc(userRecord.uid);
-      const userDoc = await userRef.get();
+      const userRef  = db().collection("users").doc(userRecord.uid);
+      const userDoc  = await userRef.get();
       const fullName = (userDoc.data()?.fullName as string) ?? email;
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiry = admin.firestore.Timestamp.fromDate(new Date(Date.now() + 15 * 60 * 1000));
-      await userRef.update({ verificationCode: code, verificationCodeExpiry: expiry });
+      const code     = await issueOTP(userRef, "verificationCode");
       await sendVerificationCode(email, fullName, code);
     }
   } catch (err) {
@@ -260,7 +296,7 @@ router.post("/resend-verification", async (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// POST /auth/verify-code - validate OTP, mark verified, auto-login
+// POST /auth/verify-code
 router.post("/verify-code", async (req: Request, res: Response) => {
   const { uid, code, email, password } = req.body as {
     uid?: string; code?: string; email?: string; password?: string;
@@ -271,29 +307,26 @@ router.post("/verify-code", async (req: Request, res: Response) => {
     return;
   }
 
+  // Rate-limit: 5 attempts per 15 minutes per uid
+  if (!checkRateLimit(`verify:${uid}`, 5, 15 * 60 * 1000)) {
+    res.status(429).json({ error: { code: "TOO_MANY_ATTEMPTS" } });
+    return;
+  }
+
   try {
     const userRef = db().collection("users").doc(uid);
     const userDoc = await userRef.get();
-    const data = userDoc.data();
+    const data    = userDoc.data();
 
-    if (!data?.verificationCode) {
-      res.status(400).json({ error: { code: "INVALID_CODE" } });
-      return;
-    }
-    if ((data.verificationCodeExpiry as admin.firestore.Timestamp).toDate() < new Date()) {
-      res.status(400).json({ error: { code: "CODE_EXPIRED" } });
-      return;
-    }
-    if (data.verificationCode !== code) {
-      res.status(400).json({ error: { code: "INVALID_CODE" } });
+    const result = validateOTP(data ?? {}, code, "verificationCode");
+    if (result !== "ok") {
+      res.status(400).json({ error: { code: result } });
       return;
     }
 
     await admin.auth().updateUser(uid, { emailVerified: true });
-    await userRef.update({
-      verificationCode: admin.firestore.FieldValue.delete(),
-      verificationCodeExpiry: admin.firestore.FieldValue.delete(),
-    });
+    await clearOTP(userRef, "verificationCode");
+    clearRateLimit(`verify:${uid}`);
 
     const session = await signInWithPassword(email, password);
     res.json({
@@ -302,9 +335,9 @@ router.post("/verify-code", async (req: Request, res: Response) => {
       expiresIn:    session.expiresIn,
       uid:          session.localId,
       email:        session.email,
-      fullName:     (data.fullName as string) ?? null,
-      role:         (data.role as string) ?? null,
-      isAdmin:      (data.isAdmin as boolean) ?? false,
+      fullName:     (data?.fullName as string) ?? null,
+      role:         (data?.role as string) ?? null,
+      isAdmin:      (data?.isAdmin as boolean) ?? false,
     });
   } catch (err) {
     console.error("verify-code error:", err);
@@ -312,7 +345,7 @@ router.post("/verify-code", async (req: Request, res: Response) => {
   }
 });
 
-// POST /auth/refresh - exchange a refresh token for a new ID token
+// POST /auth/refresh
 router.post("/refresh", async (req: Request, res: Response) => {
   const { refreshToken } = req.body as { refreshToken?: string };
   if (!refreshToken) {
@@ -336,20 +369,20 @@ router.post("/login", async (req: Request, res: Response) => {
     return;
   }
 
-  // Pre-check emailVerified to avoid creating and discarding a Firebase session
-  // token for unverified users. If the user is not found here, signInWithPassword
-  // will handle it with the correct error code.
+  // Rate-limit: 10 login attempts per 15 minutes per email
+  if (!checkRateLimit(`login:${email}`, 10, 15 * 60 * 1000)) {
+    res.status(429).json({ error: { code: "TOO_MANY_ATTEMPTS" } });
+    return;
+  }
+
   try {
     const preCheck = await admin.auth().getUserByEmail(email);
     if (!preCheck.emailVerified) {
-      // Send a fresh OTP so the user has a code ready on the verify screen
       try {
-        const userRef = db().collection("users").doc(preCheck.uid);
-        const userDoc = await userRef.get();
+        const userRef  = db().collection("users").doc(preCheck.uid);
+        const userDoc  = await userRef.get();
         const fullName = (userDoc.data()?.fullName as string) ?? email;
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiry = admin.firestore.Timestamp.fromDate(new Date(Date.now() + 15 * 60 * 1000));
-        await userRef.update({ verificationCode: code, verificationCodeExpiry: expiry });
+        const code     = await issueOTP(userRef, "verificationCode");
         await sendVerificationCode(email, fullName, code);
         console.log(`[verify] login: code sent to ${email}`);
       } catch (codeErr) {
@@ -365,16 +398,17 @@ router.post("/login", async (req: Request, res: Response) => {
   try {
     const session = await signInWithPassword(email, password);
     const userDoc = await db().collection("users").doc(session.localId).get();
-    const data = userDoc.data();
+    const data    = userDoc.data();
+    clearRateLimit(`login:${email}`);
     res.json({
-      idToken: session.idToken,
+      idToken:      session.idToken,
       refreshToken: session.refreshToken,
-      expiresIn: session.expiresIn,
-      uid: session.localId,
-      email: session.email,
-      fullName: (data?.fullName as string) ?? null,
-      role: (data?.role as UserRole) ?? null,
-      isAdmin: (data?.isAdmin as boolean) ?? false,
+      expiresIn:    session.expiresIn,
+      uid:          session.localId,
+      email:        session.email,
+      fullName:     (data?.fullName as string) ?? null,
+      role:         (data?.role as UserRole) ?? null,
+      isAdmin:      (data?.isAdmin as boolean) ?? false,
     });
   } catch (err) {
     const code = err instanceof IdentityToolkitError ? err.code : "UNKNOWN_ERROR";

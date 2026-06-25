@@ -92,7 +92,7 @@ export async function sendNewRequestEmail(
 
   await send(
     mentorEmail,
-    `בקשת מנטורינג חדשה מ-${menteeName}`,
+    `בקשת מנטורינג חדשה מ-${escapeHtml(menteeName)}`,
     layout(`
       <h2>שלום ${escapeHtml(mentorName)},</h2>
       <p><strong>${escapeHtml(menteeName)}</strong> שלח/ה לך בקשת מנטורינג חדשה בנושא: <strong>${escapeHtml(topic)}</strong>.</p>
@@ -126,7 +126,7 @@ export async function sendMentorResponseEmail(
 
   await send(
     menteeEmail,
-    `עדכון בקשת המנטורינג שלך — ${statusLabel}`,
+    `עדכון בקשת המנטורינג שלך — ${escapeHtml(statusLabel)}`,
     layout(`
       <h2>שלום ${escapeHtml(menteeName)},</h2>
       <p>${escapeHtml(mentorName)} עדכן/ה את הבקשה שלך לסטטוס: <strong>${statusLabel}</strong>.</p>

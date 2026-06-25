@@ -26,12 +26,12 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
     }
 
     const { mentorId, topic, description } = req.body;
-    if (!mentorId || !topic) {
+    if (!mentorId || typeof mentorId !== "string" || !topic || typeof topic !== "string" || !topic.trim()) {
       res.status(400).json({ error: { code: "MISSING_FIELDS" } });
       return;
     }
 
-    if (topic.length > TOPIC_MAX || (description && description.length > DESCRIPTION_MAX)) {
+    if (topic.length > TOPIC_MAX || (description && typeof description === "string" && description.length > DESCRIPTION_MAX)) {
       res.status(400).json({ error: { code: "FIELD_TOO_LONG" } });
       return;
     }

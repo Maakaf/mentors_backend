@@ -12,9 +12,9 @@ export async function requireAuth(
   next: NextFunction
 ): Promise<void> {
   const header = req.headers.authorization ?? "";
-  const match = header.match(/^Bearer (.+)$/);
+  const match  = header.match(/^Bearer (.+)$/);
   if (!match) {
-    res.status(401).json({ error: "Missing Authorization bearer token" });
+    res.status(401).json({ error: { code: "UNAUTHORIZED" } });
     return;
   }
 
@@ -23,17 +23,17 @@ export async function requireAuth(
     req.uid = decoded.uid;
 
     const userDoc = await admin.firestore().collection("users").doc(decoded.uid).get();
-    req.isAdmin = userDoc.exists && userDoc.data()?.isAdmin === true;
+    req.isAdmin   = userDoc.exists && userDoc.data()?.isAdmin === true;
 
     next();
   } catch {
-    res.status(401).json({ error: "Invalid or expired token" });
+    res.status(401).json({ error: { code: "INVALID_TOKEN" } });
   }
 }
 
 export function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction): void {
   if (!req.isAdmin) {
-    res.status(403).json({ error: "Admin access required" });
+    res.status(403).json({ error: { code: "FORBIDDEN" } });
     return;
   }
   next();
